@@ -6,20 +6,20 @@ from typing import Callable,Union,Literal
 from skada.datasets import make_shifted_datasets
 from skada import source_target_split
 from skada.utils import check_X_domain, check_X_y_domain, extract_source_indices
+from skada._pipeline import make_da_pipeline
 
 from sklearn.utils.validation import check_is_fitted
 from sklearn.model_selection import ParameterGrid
 
-
-# %%
 from skada._reweight import BaseReweightAdapter
 from sklearn.metrics import pairwise_kernels
 
 # %%
-class ULSIF(BaseReweightAdapter): 
+class ULSIFAdapter(BaseReweightAdapter): 
 
     def __init__(self,
-            kernel:Union[Callable, Literal["chi2", "rbf", "laplacian"]]='rbf',
+            # kernel:Union[Callable, Literal["chi2", "rbf", "laplacian"]]='rbf',
+            kernel="rbf",
             kernel_grid:dict=None, 
             reg_grid:np.ndarray=None,
             n_jobs:int=1,
@@ -106,19 +106,43 @@ class ULSIF(BaseReweightAdapter):
         self.centers_id_ = self._choose_centers()
         self.best_kernel_parameters_, self.best_regularization_ = self._hyperparameter_selection()
         self.source_weights_, self.alpha_ = self._compute_coefs_and_weights()
-        
-        # return self
 
     def compute_weights(self, X, y=None, *, sample_domain=None):
         check_is_fitted(self, 'alpha_')
         X, y, sample_domain = check_X_y_domain(X, y, sample_domain=sample_domain)
         source_id = extract_source_indices(sample_domain)
         if np.array_equal(self.Xs_, X[source_id]):
-            weights = self.source_weights_
+            source_weights = self.source_weights_
         else:
             evals = pairwise_kernels(X[source_id], self.Xt_[self.centers_id_], metric=self.kernel, filter_params=False, n_jobs=self.n_jobs, **self.best_kernel_parameters_)
-            weights = evals @ self.alpha_
+            source_weights = evals @ self.alpha_
+        weights = np.zeros(X.shape[0], dtype=source_weights.dtype)
+        weights[source_id] = source_weights
         return weights
+
+def ULSIF(
+    base_estimator=None,
+    # kernel:Union[Callable, Literal["chi2", "rbf", "laplacian"]]='rbf',
+    kernel="rbf",
+    kernel_grid:dict=None, 
+    reg_grid:np.ndarray=None,
+    n_jobs:int=1,
+    n_kernels:int=100,
+    random_seed=None
+):
+    if base_estimator is None:
+        base_estimator = LogisticRegression().set_fit_request(sample_weight=True)
+    return make_da_pipeline(
+        ULSIFAdapter(
+            kernel=kernel,
+            kernel_grid=kernel_grid,
+            reg_grid=reg_grid,
+            n_jobs=n_jobs,
+            n_kernels=n_kernels,
+            random_seed=random_seed,
+        ),
+        base_estimator,
+    )
 
 # %%
 import matplotlib.pyplot as plt
@@ -140,7 +164,6 @@ from skada import (
 from skada.datasets import make_shifted_datasets
 from skada.utils import extract_source_indices
 
-# %%
 RANDOM_SEED = 42
 
 X, y, sample_domain = make_shifted_datasets(
@@ -149,7 +172,6 @@ X, y, sample_domain = make_shifted_datasets(
 
 Xs, Xt, ys, yt = source_target_split(X, y, sample_domain=sample_domain)
 
-# %%
 x_min, x_max = -2.5, 4.5
 y_min, y_max = -1.5, 4.5
 
@@ -260,6 +282,7 @@ plot_weights_and_classifier(
     weights=np.array([2] * Xs.shape[0]),
     suptitle="Illustration of the classifier with no DA",
 )
+
 # %%
 kernel_grid = {"gamma": np.logspace(-2, 2, 5)}
 reg_grid = np.logspace(-4, 0, 5)
@@ -270,20 +293,16 @@ ulsif.fit(X, y, sample_domain=sample_domain)
 
 # %%
 # We define our classifier, `clf` is a da pipeline
-clf = DensityReweight(
-    base_estimator=base_classifier,
-    weight_estimator=ULSIF(kernel_grid=kernel_grid, reg_grid=reg_grid),
-)
-clf.fit(X, y, sample_domain=sample_domain)
+
 
 # %%
 # We get the weights:
 
 # we first get the adapter which is estimating the weights
-weight_estimator = clf[0].get_estimator()
+weight_estimator = ulsif[0].get_estimator()
 idx = extract_source_indices(sample_domain)
 weights = weight_estimator.compute_weights(X, sample_domain=sample_domain)[idx]
 
-plot_weights_and_classifier(clf, weights=weights, name="Density Reweighting")
+plot_weights_and_classifier(ulsif, weights=weights, name="Density Reweighting")
 
 # %%
